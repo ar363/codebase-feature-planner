@@ -10,6 +10,14 @@ class IngestResponse(BaseModel):
     chunks_indexed: int
 
 
+class BrowseRequest(BaseModel):
+    path: str
+
+
+class BrowseResponse(BaseModel):
+    entries: list[dict]
+
+
 class PlanRequest(BaseModel):
     feature_request: str
     codebase_path: str

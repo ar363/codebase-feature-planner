@@ -1,12 +1,15 @@
 import os
 import json
-from groq import Groq
+import logging
+import httpx
 from dotenv import load_dotenv
 
 from core.retrieve import query
 from core.tools import tree, read_file, search_files, search_in_files, list_dir, search_in_file
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a senior software engineer analyzing a codebase to plan feature implementation.
 You have been given relevant code chunks from RAG retrieval as initial context.
@@ -134,23 +137,47 @@ AVAILABLE_TOOLS = {
     "search_in_file": lambda **kw: search_in_file(kw["path"], kw["pattern"]),
 }
 
+MAX_TOOL_RESULT_CHARS = 2000  # Cap tool results to avoid bloating context
 
-def generate_plan(feature_request, codebase_path, model="llama-3.3-70b-versatile"):
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY not set. Add it to .env or environment variables.")
 
-    client = Groq(api_key=api_key)
+def _get_provider_config():
+    provider = os.environ.get("LLM_PROVIDER", "groq").lower().strip()
+    if provider == "ollama":
+        return {
+            "base_url": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/"),
+            "model": os.environ.get("OLLAMA_MODEL", "llama3.1"),
+            "api_key": "",
+        }
+    return {
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        "api_key": os.environ.get("GROQ_API_KEY", ""),
+    }
 
-    retrieved = query(feature_request, top_k=8)
-    context_parts = []
-    for r in retrieved:
-        context_parts.append(
+
+def _make_headers(config):
+    headers = {"Content-Type": "application/json"}
+    if config["api_key"]:
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+    return headers
+
+
+def _build_messages(feature_request, codebase_path):
+    try:
+        retrieved = query(feature_request, top_k=5)
+        context_parts = [
             f"--- {r['filepath']}:{r['start_line']}-{r['end_line']} ---\n{r['content']}"
-        )
-    initial_context = "\n\n".join(context_parts)
+            for r in retrieved
+        ]
+        initial_context = "\n\n".join(context_parts)
+        # Cap context size to avoid token overflow
+        if len(initial_context) > 3000:
+            initial_context = initial_context[:3000] + "\n... [context truncated]"
+    except Exception as e:
+        logger.warning(f"RAG retrieval failed: {e}. Proceeding without context.")
+        initial_context = "(RAG index not available — use tools to explore the codebase directly.)"
 
-    messages = [
+    return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
@@ -164,57 +191,269 @@ def generate_plan(feature_request, codebase_path, model="llama-3.3-70b-versatile
         },
     ]
 
-    for _ in range(5):
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=TOOL_DEFINITIONS,
-            tool_choice="auto",
+
+def _call_llm(config, messages, tools=None):
+    """
+    Makes a single non-streaming LLM call.
+    Returns (content: str, tool_calls: list | None).
+    Raises on HTTP or parse errors.
+    """
+    body = {
+        "model": config["model"],
+        "messages": messages,
+        "stream": False,
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+
+    with httpx.Client(timeout=120) as client:
+        resp = client.post(
+            f"{config['base_url']}/chat/completions",
+            headers=_make_headers(config),
+            json=body,
         )
 
-        choice = response.choices[0]
-        msg = choice.message
+    if resp.status_code != 200:
+        try:
+            err = resp.json()
+            detail = err.get("error", {}).get("message", resp.text)
+        except Exception:
+            detail = resp.text
+        raise RuntimeError(f"LLM API error {resp.status_code}: {detail}")
 
-        if not msg.tool_calls:
-            return msg.content
+    data = resp.json()
+    choice = data["choices"][0]
+    message = choice["message"]
+    content = message.get("content") or ""
+    finish_reason = choice.get("finish_reason", "")
 
+    raw_tool_calls = message.get("tool_calls")
+    if finish_reason == "tool_calls" and raw_tool_calls:
+        tool_calls = [
+            {
+                "id": tc["id"],
+                "function": {
+                    "name": tc["function"]["name"],
+                    "arguments": tc["function"]["arguments"],
+                },
+            }
+            for tc in raw_tool_calls
+        ]
+        return content, tool_calls
+
+    return content, None
+
+
+def _call_llm_streaming(config, messages, tools=None):
+    """
+    Makes a streaming LLM call, yielding text chunks as they arrive.
+    Returns (full_content: str, tool_calls: list | None) at the end.
+    Yields ("chunk", text) tuples while streaming.
+    Raises on HTTP errors.
+    """
+    body = {
+        "model": config["model"],
+        "messages": messages,
+        "stream": True,
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+
+    content_buffer = ""
+    # tool_calls_buffer: index -> {id, function: {name, arguments}}
+    tool_calls_buffer: dict = {}
+    finish_reason = None
+
+    with httpx.Client(timeout=120) as client:
+        with client.stream(
+            "POST",
+            f"{config['base_url']}/chat/completions",
+            headers=_make_headers(config),
+            json=body,
+        ) as resp:
+            if resp.status_code != 200:
+                # Read the error body before closing
+                body_bytes = b"".join(resp.iter_bytes())
+                try:
+                    err = json.loads(body_bytes)
+                    detail = err.get("error", {}).get("message", body_bytes.decode())
+                except Exception:
+                    detail = body_bytes.decode()
+                raise RuntimeError(f"LLM API error {resp.status_code}: {detail}")
+
+            for line in resp.iter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                if not payload:
+                    continue
+
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+
+                choice = choices[0]
+                delta = choice.get("delta", {})
+                finish_reason = choice.get("finish_reason") or finish_reason
+
+                # Accumulate text content
+                text = delta.get("content") or ""
+                if text:
+                    content_buffer += text
+                    yield ("chunk", text)
+
+                # Accumulate tool call fragments
+                for tc in (delta.get("tool_calls") or []):
+                    idx = tc.get("index", 0)
+                    if idx not in tool_calls_buffer:
+                        tool_calls_buffer[idx] = {
+                            "id": tc.get("id", ""),
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    fn = tc.get("function", {})
+                    if fn.get("name"):
+                        tool_calls_buffer[idx]["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        tool_calls_buffer[idx]["function"]["arguments"] += fn["arguments"]
+
+    # After stream ends, emit the final result
+    if finish_reason == "tool_calls" and tool_calls_buffer:
+        tool_calls = [tool_calls_buffer[i] for i in sorted(tool_calls_buffer.keys())]
+        yield ("result", content_buffer, tool_calls)
+    else:
+        yield ("result", content_buffer, None)
+
+
+def stream_plan(feature_request, codebase_path):
+    """
+    Main generator. Yields SSE-style event dicts:
+      {type: "thought" | "chunk" | "tool_call" | "tool_result" | "plan_chunk" | "done" | "error", data: ...}
+    """
+    config = _get_provider_config()
+
+    if not config["api_key"] and "groq.com" in config["base_url"]:
+        yield {"type": "error", "data": "GROQ_API_KEY not set. Add it to .env"}
+        return
+
+    # ── Step 1: RAG retrieval ──────────────────────────────────────────────
+    yield {"type": "thought", "data": "Retrieving relevant context via RAG..."}
+    try:
+        messages = _build_messages(feature_request, codebase_path)
+    except Exception as e:
+        yield {"type": "error", "data": f"Failed to build context: {e}"}
+        return
+
+    yield {"type": "thought", "data": "Starting LLM agent loop..."}
+
+    # ── Step 2: Agentic tool-use loop (up to 5 turns) ─────────────────────
+    for turn in range(5):
+        yield {"type": "thought", "data": f"Analyzing codebase (turn {turn + 1})..."}
+
+        # Always use non-streaming for tool-use turns — SSE streaming with
+        # tool_calls finish_reason is unreliable across providers. We get the
+        # complete structured response and surface tool calls cleanly.
+        try:
+            content, tool_calls = _call_llm(config, messages, tools=TOOL_DEFINITIONS)
+        except Exception as e:
+            yield {"type": "error", "data": f"LLM call failed (turn {turn + 1}): {e}"}
+            return
+
+        # If no tool calls → model produced the plan directly
+        if not tool_calls:
+            if content.strip():
+                yield {"type": "plan_chunk", "data": content}
+                yield {"type": "done", "data": content}
+                return
+            # Empty response — model may have been confused, retry
+            yield {"type": "thought", "data": f"Empty response on turn {turn + 1}, retrying with explicit instruction..."}
+            messages.append({"role": "user", "content": "Please provide the implementation plan now."})
+            continue
+
+        # ── Append assistant message with tool calls ───────────────────────
         messages.append({
             "role": "assistant",
-            "content": msg.content or "",
+            "content": content or "",
             "tool_calls": [
                 {
-                    "id": tc.id,
+                    "id": tc["id"],
                     "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    "function": {
+                        "name": tc["function"]["name"],
+                        "arguments": tc["function"]["arguments"],
+                    },
                 }
-                for tc in msg.tool_calls
+                for tc in tool_calls
             ],
         })
 
-        for tc in msg.tool_calls:
-            name = tc.function.name
+        # ── Execute each tool ──────────────────────────────────────────────
+        for tc in tool_calls:
+            name = tc["function"]["name"]
             try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
+                args = json.loads(tc["function"]["arguments"])
+            except (json.JSONDecodeError, TypeError):
                 args = {}
+
+            yield {"type": "tool_call", "data": {"name": name, "arguments": args}}
 
             fn = AVAILABLE_TOOLS.get(name)
             if fn:
                 try:
                     result = fn(**args)
+                    # Cap large tool outputs
+                    if len(result) > MAX_TOOL_RESULT_CHARS:
+                        result = result[:MAX_TOOL_RESULT_CHARS] + f"\n... [truncated, {len(result)} chars total]"
                 except Exception as e:
-                    result = f"Error: {e}"
+                    result = f"Error executing tool: {e}"
             else:
                 result = f"Unknown tool: {name}"
 
+            yield {"type": "tool_result", "data": {"name": name, "result": result[:500]}}
+
             messages.append({
                 "role": "tool",
-                "tool_call_id": tc.id,
+                "tool_call_id": tc["id"],
                 "content": str(result),
             })
 
-    final = client.chat.completions.create(
-        model=model,
-        messages=messages,
-    )
-    return final.choices[0].message.content
+    # ── Step 3: Final forced plan generation (no tools) ───────────────────
+    yield {"type": "thought", "data": "Generating final implementation plan..."}
+    try:
+        content = ""
+        for item in _call_llm_streaming(config, messages):   # no tools → forces text output
+            if item[0] == "chunk":
+                _, text = item
+                content += text
+                yield {"type": "plan_chunk", "data": text}
+            elif item[0] == "result":
+                _, content, _ = item
+    except Exception as e:
+        yield {"type": "error", "data": f"Final plan generation failed: {e}"}
+        return
+
+    yield {"type": "done", "data": content}
+
+
+def generate_plan(feature_request, codebase_path):
+    """Blocking wrapper around stream_plan for the non-streaming /plan endpoint."""
+    full = ""
+    for event in stream_plan(feature_request, codebase_path):
+        et = event["type"]
+        if et == "plan_chunk":
+            full += event["data"]
+        elif et == "done":
+            if event["data"]:
+                full = event["data"]
+        elif et == "error":
+            raise ValueError(event["data"])
+    return full
