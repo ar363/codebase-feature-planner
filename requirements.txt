@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+chromadb
+sentence-transformers
+rank_bm25
+groq
+python-dotenv
+pydantic
