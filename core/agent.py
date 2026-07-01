@@ -192,16 +192,23 @@ def _build_messages(feature_request, codebase_path):
     ]
 
 
+class FunctionCallError(RuntimeError):
+    """Raised when the LLM fails to generate a valid function call (Groq 400)."""
+    pass
+
+
 def _call_llm(config, messages, tools=None):
     """
     Makes a single non-streaming LLM call.
     Returns (content: str, tool_calls: list | None).
-    Raises on HTTP or parse errors.
+    Raises FunctionCallError when the provider rejects the tool call generation.
+    Raises RuntimeError on other HTTP errors.
     """
     body = {
         "model": config["model"],
         "messages": messages,
         "stream": False,
+        "max_tokens": 4096,  # Guarantee enough budget for tool call JSON + plan output
     }
     if tools:
         body["tools"] = tools
@@ -218,6 +225,13 @@ def _call_llm(config, messages, tools=None):
         try:
             err = resp.json()
             detail = err.get("error", {}).get("message", resp.text)
+            # Groq-specific: model failed to produce valid tool call JSON
+            if resp.status_code == 400 and "failed_generation" in err.get("error", {}).get("code", "").lower():
+                raise FunctionCallError(detail)
+            if resp.status_code == 400 and ("failed to call" in detail.lower() or "failed_generation" in detail.lower()):
+                raise FunctionCallError(detail)
+        except (FunctionCallError, RuntimeError):
+            raise
         except Exception:
             detail = resp.text
         raise RuntimeError(f"LLM API error {resp.status_code}: {detail}")
@@ -359,11 +373,24 @@ def stream_plan(feature_request, codebase_path):
     for turn in range(5):
         yield {"type": "thought", "data": f"Analyzing codebase (turn {turn + 1})..."}
 
-        # Always use non-streaming for tool-use turns — SSE streaming with
-        # tool_calls finish_reason is unreliable across providers. We get the
-        # complete structured response and surface tool calls cleanly.
+        # Always use non-streaming for tool-use turns.
         try:
             content, tool_calls = _call_llm(config, messages, tools=TOOL_DEFINITIONS)
+        except FunctionCallError as e:
+            # Groq rejected the tool call JSON generation — drop tools and force a
+            # direct plan. This is a model-side formatting failure, not a logic error.
+            yield {"type": "thought", "data": "Tool call generation failed — generating plan directly..."}
+            try:
+                content, _ = _call_llm(config, messages, tools=None)
+            except Exception as e2:
+                yield {"type": "error", "data": f"Plan generation failed: {e2}"}
+                return
+            if content.strip():
+                yield {"type": "plan_chunk", "data": content}
+                yield {"type": "done", "data": content}
+            else:
+                yield {"type": "error", "data": "Model returned an empty plan. Try rephrasing your feature request."}
+            return
         except Exception as e:
             yield {"type": "error", "data": f"LLM call failed (turn {turn + 1}): {e}"}
             return

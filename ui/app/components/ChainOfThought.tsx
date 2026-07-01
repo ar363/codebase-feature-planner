@@ -39,7 +39,7 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
         steps.push({
           id: `reasoning-${idx}`,
           type: 'reasoning',
-          title: 'Agent Reasoning',
+          title: 'Agent reasoning analysis',
           content: activeReasoning,
         })
         activeReasoning = ''
@@ -55,13 +55,12 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
         steps.push({
           id: `tool-${idx}`,
           type: 'tool',
-          title: `Running Tool: ${ev.data.name}`,
+          title: `Invoked action: ${ev.data.name}`,
           toolName: ev.data.name,
           toolArgs: ev.data.arguments,
           isActive: true, // will be set to false if a result comes in
         })
       } else if (ev.type === 'tool_result') {
-        // Find the last tool step that matches this tool name and doesn't have a result yet
         const lastToolStep = [...steps]
           .reverse()
           .find((s) => s.type === 'tool' && s.toolName === ev.data.name && !s.toolResult)
@@ -73,7 +72,7 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
           steps.push({
             id: `tool-result-${idx}`,
             type: 'tool',
-            title: `Tool Output: ${ev.data.name}`,
+            title: `Action response: ${ev.data.name}`,
             toolName: ev.data.name,
             toolResult: ev.data.result,
           })
@@ -82,7 +81,7 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
         steps.push({
           id: `error-${idx}`,
           type: 'error',
-          title: 'Error Encountered',
+          title: 'Error encountered',
           content: ev.data,
         })
       }
@@ -94,7 +93,7 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
     steps.push({
       id: 'reasoning-final',
       type: 'reasoning',
-      title: 'Agent Reasoning',
+      title: 'Agent reasoning analysis',
       content: activeReasoning,
     })
   }
@@ -114,23 +113,24 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
   if (events.length === 0 && !planning) return null
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between border-b border-neutral-850 pb-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
+    <div className="bg-[#0b0c13]/60 border border-slate-800/40 rounded-xl p-5 space-y-4 shadow-md">
+      <div className="flex items-center justify-between border-b border-slate-800/40 pb-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 font-display flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
           Agent Execution Logs
         </h3>
         {planning && (
-          <div className="flex items-center gap-2 text-xs text-indigo-400">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
-            </span>
-            <span>Agent thinking...</span>
+          <div className="flex items-center gap-2 text-xs text-indigo-400 font-medium">
+            <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+            <span>Reasoning...</span>
           </div>
         )}
       </div>
 
-      <div className="relative pl-6 border-l border-neutral-800/80 space-y-5 ml-2 py-2">
+      <div className="relative pl-6 border-l border-slate-800/60 space-y-5 ml-2.5 py-1">
         {steps.map((step) => {
           const isExpanded = !!expandedResults[step.id]
 
@@ -138,40 +138,41 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
             <div key={step.id} className="relative group">
               {/* Timeline Icon */}
               <div
-                className={`absolute -left-[31px] top-1.5 flex h-6 w-6 items-center justify-center rounded-full border bg-neutral-950 transition-all duration-300 ${
+                className={`absolute -left-[35px] top-1.5 flex h-6 w-6 items-center justify-center rounded-full border bg-[#07080c] transition-all duration-300 ${
                   step.isActive
-                    ? 'border-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.5)] scale-110'
+                    ? 'border-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.4)] scale-105'
                     : step.type === 'error'
-                    ? 'border-red-800 text-red-500'
+                    ? 'border-red-900 text-red-400 bg-red-950/20'
                     : step.type === 'tool'
-                    ? 'border-amber-700 text-amber-500'
+                    ? 'border-amber-700/80 text-amber-500 bg-amber-950/10'
                     : step.type === 'reasoning'
-                    ? 'border-blue-700 text-blue-400'
-                    : 'border-neutral-850 text-neutral-500'
+                    ? 'border-blue-800/80 text-blue-400 bg-blue-950/10'
+                    : 'border-slate-800 text-slate-500'
                 }`}
               >
                 {step.isActive ? (
-                  <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <svg className="animate-spin h-3 w-3 text-indigo-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                   </svg>
                 ) : step.type === 'error' ? (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
                     <line x1="12" y1="9" x2="12" y2="13" />
                     <line x1="12" y1="17" x2="12.01" y2="17" />
                   </svg>
                 ) : step.type === 'tool' ? (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                   </svg>
                 ) : step.type === 'reasoning' ? (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1 0-3.12 3 3 0 0 1 0-4.88 2.5 2.5 0 0 1 0-3.12A2.5 2.5 0 0 1 9.5 2z" />
-                    <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 0-3.12 3 3 0 0 0 0-4.88 2.5 2.5 0 0 0 0-3.12A2.5 2.5 0 0 0 14.5 2z" />
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                    <line x1="12" y1="22.08" x2="12" y2="12" />
                   </svg>
                 ) : (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <circle cx="12" cy="12" r="10" />
                     <line x1="12" y1="16" x2="12" y2="12" />
                     <line x1="12" y1="8" x2="12.01" y2="8" />
@@ -180,18 +181,18 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
               </div>
 
               {/* Step Card Content */}
-              <div className="bg-neutral-900/60 hover:bg-neutral-900 border border-neutral-800/80 rounded-lg p-3 transition-colors duration-200">
+              <div className="bg-[#0f111a]/40 hover:bg-[#0f111a]/85 border border-slate-800/40 rounded-lg p-3.5 transition-colors duration-200 shadow-sm">
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0 flex-1">
                     <h4
-                      className={`text-xs font-semibold ${
+                      className={`text-xs font-semibold font-display tracking-wide ${
                         step.type === 'error'
                           ? 'text-red-400'
                           : step.type === 'tool'
                           ? 'text-amber-300'
                           : step.type === 'reasoning'
-                          ? 'text-blue-350'
-                          : 'text-neutral-300'
+                          ? 'text-blue-300'
+                          : 'text-slate-300'
                       }`}
                     >
                       {step.title}
@@ -199,11 +200,11 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
 
                     {/* Tool Arguments */}
                     {step.toolArgs && (
-                      <div className="mt-1 flex flex-wrap gap-1 items-center">
-                        <span className="text-[9px] uppercase font-bold text-neutral-500">Params:</span>
+                      <div className="mt-1.5 flex flex-wrap gap-1 items-center">
+                        <span className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Params:</span>
                         {Object.entries(step.toolArgs).map(([key, val]) => (
-                          <code key={key} className="text-[10px] bg-neutral-950 text-neutral-400 border border-neutral-850 rounded px-1 py-0.5 font-mono truncate max-w-[200px]" title={`${key}: ${JSON.stringify(val)}`}>
-                            {key}: <span className="text-amber-400/90">{JSON.stringify(val)}</span>
+                          <code key={key} className="text-[10px] bg-[#07080c] text-slate-400 border border-slate-800/60 rounded px-1.5 py-0.5 font-mono truncate max-w-[200px]" title={`${key}: ${JSON.stringify(val)}`}>
+                            {key}: <span className="text-amber-450">{JSON.stringify(val)}</span>
                           </code>
                         ))}
                       </div>
@@ -214,11 +215,11 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
                   {step.type === 'tool' && step.toolResult && (
                     <button
                       onClick={() => toggleExpand(step.id)}
-                      className="flex items-center gap-1 text-[10px] text-neutral-400 hover:text-neutral-200 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 rounded px-2 py-0.5 transition-all"
+                      className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-white bg-slate-900 border border-slate-800 rounded px-2.5 py-1 transition-all"
                     >
-                      <span>{isExpanded ? 'Hide' : 'Show Output'}</span>
+                      <span>{isExpanded ? 'Hide Output' : 'View Output'}</span>
                       <svg
-                        className={`w-2.5 h-2.5 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+                        className={`w-3 h-3 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
@@ -234,31 +235,31 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
 
                 {/* Step Body (Content or Tool Results) */}
                 {step.content && (
-                  <div className="mt-2 text-xs text-neutral-300 leading-relaxed font-sans whitespace-pre-wrap">
+                  <div className="mt-2 text-xs text-slate-350 leading-relaxed font-sans whitespace-pre-wrap">
                     {step.content}
                   </div>
                 )}
 
                 {/* Expandable Tool Result console window */}
                 {step.type === 'tool' && isExpanded && step.toolResult && (
-                  <div className="mt-2.5 border border-neutral-800 rounded overflow-hidden bg-neutral-950">
+                  <div className="mt-2.5 border border-slate-800/60 rounded-lg overflow-hidden bg-[#050609] shadow-inner">
                     {/* Console Header */}
-                    <div className="flex items-center justify-between px-2.5 py-1 border-b border-neutral-800 bg-neutral-900/80">
-                      <span className="text-[9px] font-mono font-bold text-neutral-400 flex items-center gap-1">
-                        <span className="w-1 h-1 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
-                        CONSOLE: {step.toolName}
+                    <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-800/60 bg-[#08090d]">
+                      <span className="text-[9px] font-mono font-bold text-slate-450 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
+                        TERMINAL: {step.toolName}
                       </span>
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(step.toolResult || '')
                         }}
-                        className="text-[9px] text-neutral-500 hover:text-neutral-300 transition-colors font-mono"
+                        className="text-[9px] text-indigo-400 hover:text-indigo-300 transition-colors font-mono"
                       >
-                        COPY
+                        COPY OUTPUT
                       </button>
                     </div>
                     {/* Console Body */}
-                    <pre className="p-2.5 text-[10px] text-neutral-300 font-mono overflow-x-auto max-h-60 overflow-y-auto whitespace-pre leading-relaxed select-text">
+                    <pre className="p-3 text-[10px] text-slate-300 font-mono overflow-x-auto max-h-60 overflow-y-auto whitespace-pre leading-relaxed select-text">
                       {step.toolResult}
                     </pre>
                   </div>
@@ -266,9 +267,9 @@ export default function ChainOfThought({ events, planning }: ChainOfThoughtProps
 
                 {/* Tool is running status placeholder */}
                 {step.type === 'tool' && step.isActive && (
-                  <div className="mt-1.5 text-[10px] italic text-neutral-500 flex items-center gap-1.5">
-                    <span className="w-1 h-1 rounded-full bg-amber-500 inline-block animate-ping"></span>
-                    Executing tool commands and gathering output...
+                  <div className="mt-1.5 text-[10px] italic text-slate-500 flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block animate-ping"></span>
+                    Executing workspace command and harvesting response...
                   </div>
                 )}
               </div>
