@@ -6,6 +6,16 @@ SKIP_DIRS = {
     "__pycache__", "dist", "build", ".next", ".turbo",
     ".idea", ".vscode", ".bzr", ".hg", ".svn",
     "target", "vendor", ".tox", ".eggs", "eggs",
+    "chroma_data",
+}
+
+SKIP_EXTS = {
+    ".lock", ".sqlite3", ".sqlite", ".db",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".zip", ".tar", ".gz", ".rar",
+    ".exe", ".dll", ".so", ".dylib",
+    ".pyc", ".pyo",
 }
 
 

@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 import pathspec
 
-from core.tools import SKIP_DIRS
+from core.tools import SKIP_DIRS, SKIP_EXTS
 
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_data")
@@ -172,6 +172,9 @@ def ingest(path):
         if spec:
             dirs[:] = [d for d in dirs if not spec.match_file(prefix + d)]
             files = [f for f in files if not spec.match_file(prefix + f)]
+
+        ext_skip = SKIP_EXTS
+        files = [f for f in files if os.path.splitext(f)[1].lower() not in ext_skip]
 
         for f in files:
             filepath = os.path.join(root, f)
