@@ -1,11 +1,17 @@
 import os
 import pickle
+from functools import lru_cache
 
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 from core.ingest import DATA_DIR, CHROMA_DIR, BM25_PATH, CHUNKS_PATH
+
+
+@lru_cache(maxsize=1)
+def _get_model():
+    return SentenceTransformer("BAAI/bge-small-en-v1.5")
 
 
 def _load_indexes():
@@ -32,7 +38,7 @@ def reciprocal_rank_fusion(vector_ids, bm25_ids, k=60):
 
 def query(query_text, top_k=8):
     collection, bm25, chunks = _load_indexes()
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = _get_model()
 
     query_embedding = model.encode(query_text).tolist()
 

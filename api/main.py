@@ -8,9 +8,19 @@ from pydantic import BaseModel
 from core.models import IngestRequest, IngestResponse, PlanRequest, PlanResponse, BrowseRequest, BrowseResponse
 from core.ingest import ingest
 from core.agent import stream_plan, generate_plan
+from core.retrieve import _get_model as _warmup_model
 from core import history as hist
 
 app = FastAPI(title="Codebase Feature Planner")
+
+
+@app.on_event("startup")
+def warmup():
+    """Pre-load the embedding model so the first query/ingest isn't slow."""
+    try:
+        _warmup_model()
+    except Exception:
+        pass  # model not available yet (e.g. first download deferred)
 
 app.add_middleware(
     CORSMiddleware,

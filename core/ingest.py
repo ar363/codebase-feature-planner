@@ -1,6 +1,7 @@
 import os
 import re
 import pickle
+from functools import lru_cache
 
 import chromadb
 from chromadb.config import Settings
@@ -9,6 +10,11 @@ from rank_bm25 import BM25Okapi
 import pathspec
 
 from core.tools import SKIP_DIRS, SKIP_EXTS
+
+
+@lru_cache(maxsize=1)
+def _get_model():
+    return SentenceTransformer("BAAI/bge-small-en-v1.5")
 
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_data")
@@ -149,7 +155,7 @@ def ingest(path):
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = _get_model()
     client = chromadb.PersistentClient(path=CHROMA_DIR, settings=Settings(anonymized_telemetry=False))
 
     try:

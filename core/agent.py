@@ -12,9 +12,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a senior software engineer analyzing a codebase to plan feature implementation.
-You have been given relevant code chunks from RAG retrieval as initial context.
-You also have tools to explore the codebase further if needed.
 
+## Required exploration process
+You MUST explore the codebase using the available tools before creating a plan.
+Do NOT produce a plan based solely on the RAG context — it is only a starting point.
+
+Follow this process:
+1. Start by running `tree` to understand the project layout.
+2. Read key files relevant to the feature — examine their structure, imports, and existing patterns.
+3. Verify your understanding by exploring at least 3 files before concluding.
+
+## Plan format
 Your final output must be a structured implementation plan in this exact format:
 ## Plan: [feature name]
 
@@ -43,7 +51,7 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the directory"},
-                    "depth": {"type": "integer", "description": "Max recursion depth", "default": 3},
+                    "depth": {"type": "integer", "description": "Max recursion depth", "default": 2},
                 },
                 "required": ["path"],
             },
@@ -137,7 +145,17 @@ AVAILABLE_TOOLS = {
     "search_in_file": lambda **kw: search_in_file(kw["path"], kw["pattern"]),
 }
 
-MAX_TOOL_RESULT_CHARS = 2000  # Cap tool results to avoid bloating context
+MAX_TOOL_RESULT_CHARS = 800  # Cap tool results fed back to LLM context
+MAX_TOOL_RESULT_DISPLAY_CHARS = 400  # Cap for SSE display (shorter since it's UI-only)
+MIN_EXPLORATION_TOOL_CALLS = 3  # Minimum tool calls before a plan is accepted
+
+EXPLORATION_TOOLS = {"tree", "read_file", "list_dir", "search_files", "search_in_files", "search_in_file"}
+
+
+def _has_explored_enough(tool_calls_history):
+    """Check minimum codebase exploration was performed before accepting a plan."""
+    count = sum(1 for tc in tool_calls_history if tc["function"]["name"] in EXPLORATION_TOOLS)
+    return count >= MIN_EXPLORATION_TOOL_CALLS
 
 
 def _get_provider_config():
@@ -150,7 +168,7 @@ def _get_provider_config():
         }
     return {
         "base_url": "https://api.groq.com/openai/v1",
-        "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        "model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
         "api_key": os.environ.get("GROQ_API_KEY", ""),
     }
 
@@ -185,8 +203,8 @@ def _build_messages(feature_request, codebase_path):
                 f"Codebase path: {codebase_path}\n\n"
                 f"Feature request: {feature_request}\n\n"
                 f"Relevant code context from RAG retrieval:\n{initial_context}\n\n"
-                "Use the available tools to explore the codebase further if needed, "
-                "then produce a structured implementation plan."
+                "You MUST use the available tools to explore the codebase before planning. "
+                "Explore at least 3 files, then produce a structured implementation plan."
             ),
         },
     ]
@@ -208,7 +226,7 @@ def _call_llm(config, messages, tools=None):
         "model": config["model"],
         "messages": messages,
         "stream": False,
-        "max_tokens": 4096,  # Guarantee enough budget for tool call JSON + plan output
+        "max_tokens": 2048,  # Tool call JSON doesn't need many tokens; final plan uses streaming
     }
     if tools:
         body["tools"] = tools
@@ -228,7 +246,7 @@ def _call_llm(config, messages, tools=None):
             # Groq-specific: model failed to produce valid tool call JSON
             if resp.status_code == 400 and "failed_generation" in err.get("error", {}).get("code", "").lower():
                 raise FunctionCallError(detail)
-            if resp.status_code == 400 and ("failed to call" in detail.lower() or "failed_generation" in detail.lower()):
+            if resp.status_code == 400 and any(p in detail.lower() for p in ("failed to call", "failed_generation", "tool call validation failed")):
                 raise FunctionCallError(detail)
         except (FunctionCallError, RuntimeError):
             raise
@@ -270,6 +288,7 @@ def _call_llm_streaming(config, messages, tools=None):
         "model": config["model"],
         "messages": messages,
         "stream": True,
+        "max_tokens": 4096,
     }
     if tools:
         body["tools"] = tools
@@ -370,6 +389,9 @@ def stream_plan(feature_request, codebase_path):
     yield {"type": "thought", "data": "Starting LLM agent loop..."}
 
     # ── Step 2: Agentic tool-use loop (up to 5 turns) ─────────────────────
+    all_tool_calls = []
+    tool_call_fell_back = False
+
     for turn in range(5):
         yield {"type": "thought", "data": f"Analyzing codebase (turn {turn + 1})..."}
 
@@ -377,8 +399,25 @@ def stream_plan(feature_request, codebase_path):
         try:
             content, tool_calls = _call_llm(config, messages, tools=TOOL_DEFINITIONS)
         except FunctionCallError as e:
-            # Groq rejected the tool call JSON generation — drop tools and force a
-            # direct plan. This is a model-side formatting failure, not a logic error.
+            if not tool_call_fell_back:
+                # First failure — retry without tools to get a verbal description,
+                # then continue the loop to try tools again next turn.
+                tool_call_fell_back = True
+                yield {"type": "thought", "data": "Tool call failed — asking for verbal analysis before retrying..."}
+                messages.append({
+                    "role": "user",
+                    "content": "Tool calling encountered a temporary error. Describe what part of the codebase "
+                               "you want to explore and what you're looking for. I'll use your analysis to continue."
+                })
+                try:
+                    content, _ = _call_llm(config, messages, tools=None)
+                except Exception as e2:
+                    yield {"type": "error", "data": f"LLM communication failed: {e2}"}
+                    return
+                if content.strip():
+                    messages.append({"role": "assistant", "content": content})
+                continue
+            # Second failure — drop tools and force a direct plan.
             yield {"type": "thought", "data": "Tool call generation failed — generating plan directly..."}
             try:
                 content, _ = _call_llm(config, messages, tools=None)
@@ -398,12 +437,22 @@ def stream_plan(feature_request, codebase_path):
         # If no tool calls → model produced the plan directly
         if not tool_calls:
             if content.strip():
-                yield {"type": "plan_chunk", "data": content}
-                yield {"type": "done", "data": content}
-                return
+                # Only accept the plan if minimum exploration was done
+                if _has_explored_enough(all_tool_calls):
+                    yield {"type": "plan_chunk", "data": content}
+                    yield {"type": "done", "data": content}
+                    return
+                yield {"type": "thought", "data": "Plan was produced too early — need more codebase exploration first."}
+                messages.append({
+                    "role": "user",
+                    "content": "You must explore the codebase using the available tools before providing the plan. "
+                               "Run at least 3 exploration commands (e.g. tree, read_file, search_in_files) to understand "
+                               "the project, then produce the plan. Do not output the plan yet."
+                })
+                continue
             # Empty response — model may have been confused, retry
             yield {"type": "thought", "data": f"Empty response on turn {turn + 1}, retrying with explicit instruction..."}
-            messages.append({"role": "user", "content": "Please provide the implementation plan now."})
+            messages.append({"role": "user", "content": "Please explore the codebase using the available tools."})
             continue
 
         # ── Append assistant message with tool calls ───────────────────────
@@ -445,13 +494,16 @@ def stream_plan(feature_request, codebase_path):
             else:
                 result = f"Unknown tool: {name}"
 
-            yield {"type": "tool_result", "data": {"name": name, "result": result[:500]}}
+            yield {"type": "tool_result", "data": {"name": name, "result": result[:MAX_TOOL_RESULT_DISPLAY_CHARS]}}
 
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": str(result),
             })
+
+        # Track tool calls for exploration check
+        all_tool_calls.extend(tool_calls)
 
     # ── Step 3: Final forced plan generation (no tools) ───────────────────
     yield {"type": "thought", "data": "Generating final implementation plan..."}

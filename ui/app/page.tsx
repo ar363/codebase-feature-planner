@@ -32,6 +32,8 @@ export default function Home() {
   const [newWorkspacePath, setNewWorkspacePath] = useState('')
   const [showAddWorkspaceInput, setShowAddWorkspaceInput] = useState(false)
 
+  const abortRef = useRef<AbortController | null>(null)
+
   // Fetch past workspaces and plans
   async function fetchHistory() {
     try {
@@ -80,8 +82,19 @@ export default function Home() {
     eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [events])
 
+  // Abort in-flight plan request on unmount
+  useEffect(() => {
+    return () => abortRef.current?.abort()
+  }, [])
+
   async function handlePlan() {
     if (!feature || !codebasePath) return
+
+    // Cancel any in-flight plan request
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setPlanning(true)
     setPlan('')
     setEvents([])
@@ -91,6 +104,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ feature_request: feature, codebase_path: codebasePath }),
+        signal: controller.signal,
       })
       if (!res.ok) {
         setPlan(`Error: ${res.status}`)
@@ -138,8 +152,12 @@ export default function Home() {
       }
       // Reload history to capture newly completed plan
       fetchHistory()
-    } catch {
-      setPlan('Error: could not reach backend')
+    } catch (e: any) {
+      if (e?.name === 'AbortError') {
+        // Request was cancelled by user, ignore
+      } else {
+        setPlan('Error: could not reach backend')
+      }
     }
     setPlanning(false)
   }
